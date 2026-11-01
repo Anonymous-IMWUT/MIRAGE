@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tier 1, shipped configuration -- the exact invocation the reported end-to-end runs used.
+# Tier 1, shipped configuration. --segskip-n 6 --fail-closed came after the reported end-to-end
+# renders, which ran without them, so their utility numbers do not describe this mask.
 #
 #   ./run_tier1.sh <input.mp4> <output_dir> [n_people] [ttp_url]
 #
@@ -25,6 +26,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 python "$REPO/tier1/scripts/run_tier1.py" "$CLIP" \
     --headless --no-save \
     --anonymizer yolo11n_boxfill \
+    --segskip-n 6 --fail-closed \
     --gait-anon --gait-preset e2 \
     --mask-shape-mode bbox --mask-temporal-win 2 \
     --score-binarize-thresh 0.5 \

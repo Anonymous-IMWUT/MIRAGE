@@ -156,6 +156,17 @@ if __name__ == "__main__":
                               "hardcoded at 0.5, so leave this at 0.5 unless you mean to move "
                               "both.")
 
+    defence.add_argument("--fail-closed", action="store_true",
+                         help="Fail-closed box mask (src/mirage/fail_closed.py): a low mask "
+                              "threshold, the next detection warped back over each gap, and "
+                              "unmatched boxes held for 2 more detector cycles. Boxes follow a "
+                              "global ego-motion affine on every frame and the mask runs one "
+                              "detector gap behind the camera. --segskip-n sets that gap: the "
+                              "measured arm is 6. yolo11n_boxfill only, refused otherwise. Pose "
+                              "keeps conf 0.40; mask.mp4 carries the extra boxes.")
+    defence.add_argument("--fail-closed-conf", type=float, default=0.05,
+                         help="Mask threshold under --fail-closed (default 0.05).")
+
     args = parser.parse_args()
 
     process_video(
@@ -188,4 +199,6 @@ if __name__ == "__main__":
         mask_shape_mode       = args.mask_shape_mode,
         mask_temporal_win     = args.mask_temporal_win,
         score_binarize_thresh = args.score_binarize_thresh,
+        fail_closed           = args.fail_closed,
+        fail_closed_conf      = args.fail_closed_conf,
     )

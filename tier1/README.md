@@ -112,6 +112,7 @@ python ../tier3_restoration/scripts/ttp_stub.py <ttp_private_key.pem> 8843 &
 python scripts/run_tier1.py <input.mp4> \
     --headless --no-save \
     --anonymizer yolo11n_boxfill \
+    --segskip-n 6 --fail-closed \
     --gait-anon --gait-preset e2 \
     --mask-shape-mode bbox --mask-temporal-win 2 \
     --score-binarize-thresh 0.5 \
@@ -121,6 +122,12 @@ python scripts/run_tier1.py <input.mp4> \
 
 `--skip-n` (default 5) sets the detection/pose interval; skipped frames propagate boxes, keypoints
 and face mesh with pyramidal Lucas-Kanade optical flow. `run_tier1.py --help` lists every flag.
+
+`--fail-closed` is the mask policy (`src/mirage/fail_closed.py`): the mask takes every box at
+confidence 0.05 or above, the next detection is warped back over each gap, and a box with no match
+stays for two more detector cycles. Boxes follow a global ego-motion affine fitted on every frame.
+`--segskip-n` sets the detector interval, and the mask runs one interval behind the camera. Pose
+keeps confidence 0.40; `mask.mp4` carries the extra boxes, so Tier 2 repaints them too.
 
 The Raspberry Pi 5 edge runner is a separate entry point:
 

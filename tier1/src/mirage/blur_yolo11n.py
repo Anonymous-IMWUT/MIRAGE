@@ -77,6 +77,21 @@ class YOLO11nBoxBlur:
         mask = combined if combined.any() else None
         return mask, boxes
 
+    def get_boxes_and_conf(self, frame: np.ndarray):
+        """Every box at or above this detector's threshold, with its score, in
+        full-frame pixels. The fail-closed mask rasterizes boxes itself and needs
+        the scores to give pose its own higher threshold."""
+        r = self._model(
+            frame,
+            imgsz=self._infer_size,
+            conf=self._conf,
+            classes=[0],
+            verbose=False,
+        )[0]
+        if r.boxes is None or len(r.boxes) == 0:
+            return np.empty((0, 4), dtype=float), np.empty(0, dtype=float)
+        return r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy()
+
     def apply_mask(self, frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
         out = frame.copy()
         out[mask] = HULL_COLOR

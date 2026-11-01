@@ -26,6 +26,7 @@ from .blur_seg import SelfieSegBlur, bbox_region_mask
 from .blur_mobilesam import MobileSAMBlur, bboxes_from_keypoints
 from .blur_yoloseg import YOLOSegBlur
 from .blur_yolo11n import YOLO11nBoxBlur
+from .fail_closed import FailClosedMask, HOLD as FC_HOLD, POSE_CONF as FC_POSE_CONF
 from .face_canonical import FaceCanonicalizer, CANONICAL_SIZE, yaw_from_transform, face_quality_from_yaw
 from .face_canonical_v2 import FaceCanonicalizerV2, P_SMILE
 from .tracking import PersonState
@@ -208,6 +209,9 @@ def process_video(
                                      # 2026-08-14). None or 0 => derive from the emitted-mask fps.
     score_binarize        = None,    # None => follow gait_anon; True/False force it
     score_binarize_thresh = 0.5,     # owner decision: 0.5 == MIRAGE POSE_THRESH
+    fail_closed           = False,   # fail-closed box mask, see fail_closed.py. yolo11n_boxfill only;
+                                     # seg_skip_n is its detector interval.
+    fail_closed_conf      = 0.05,    # mask threshold when fail_closed is on; pose keeps 0.40
 ):
     if benchmark:
         save_video = False
@@ -273,6 +277,14 @@ def process_video(
         from .mask_anon import check_shape_mode as _check_shape_mode
         mask_shape_mode = _check_shape_mode(mask_shape_mode)
 
+    # Same reasoning: the policy works on detector boxes, so on any other backend, or
+    # with --no-blur, it would be declared on while doing nothing.
+    if fail_closed and (anonymizer != "yolo11n_boxfill" or not blur_bodies):
+        raise ValueError(
+            f"fail_closed needs anonymizer='yolo11n_boxfill' with blurring on "
+            f"(got anonymizer={anonymizer!r}, blur_bodies={blur_bodies})."
+        )
+
     SKIP_N = SKIP_N_DEFAULTS.copy()
     if not movement_adaptive:
         SKIP_N["slow"]   = skip_n
@@ -290,6 +302,9 @@ def process_video(
     print(f"  Benchmark mode    : {benchmark}")
     print(f"  Movement adaptive : {movement_adaptive}")
     print(f"  Skip-N            : {SKIP_N}")
+    if fail_closed:
+        print(f"  Fail-closed mask  : conf {fail_closed_conf}, two-way, hold {FC_HOLD}, "
+              f"detector every {seg_skip_n} frames")
     print(f"  Output            : {output_path}")
     print(f"  Enc output        : {enc_output_dir}")
     print(f"  Headless          : {headless}  |  Save video: {save_video}")
@@ -481,7 +496,8 @@ def process_video(
         # broke the earlier person_detector = YOLO11nBoxBlur(...) call above.)
         _y11_box_ncnn_dir = os.path.join(os.path.dirname(__file__), "..", "..", "models", "ncnn_fp32", "yolo11n_ncnn_model")
         print(f"\n[3b] Loading YOLO11n NCNN (detection-only, box grey-fill, infer_size={seg_infer_size})...")
-        yolo_seg = YOLO11nBoxBlur(model_name=_y11_box_ncnn_dir, infer_size=seg_infer_size, conf=0.4)
+        yolo_seg = YOLO11nBoxBlur(model_name=_y11_box_ncnn_dir, infer_size=seg_infer_size,
+                                  conf=fail_closed_conf if fail_closed else 0.4)
         print(f"     Anonymizer: yolo11n_boxfill")
         # Same face_canonicalizer wiring as selfie_seg (see that branch above)
         # -- without this, yolo11n_boxfill produced NO face expression signal
@@ -694,6 +710,8 @@ def process_video(
                 "host":                     "mirage.pipeline.process_video",
                 "anonymizer":               anonymizer,
                 "seg_skip_n":               int(seg_skip_n),
+                **({"fail_closed": {"mask_conf": float(fail_closed_conf), "pose_conf": FC_POSE_CONF,
+                                    "hold": FC_HOLD, "two_way": True}} if fail_closed else {}),
                 "dense_export":             bool(dense_export),
                 "export_enabled":           bool(export_enabled),
                 "score_binarize":           bool(binarize_enabled),
@@ -1199,6 +1217,9 @@ def process_video(
                       "sequence in this clip. That is a linkable pseudo-identity and is "
                       "not privacy-safe to ship.")
 
+        if fail_closed_mask is not None:
+            manifest["fail_closed"] = dict(fail_closed_mask.stats(), mask_conf=float(fail_closed_conf))
+
         with open(os.path.join(export_dir, "manifest.json"), "w") as f:
             json.dump(manifest, f, indent=2)
 
@@ -1367,10 +1388,24 @@ def process_video(
     _read_thread = threading.Thread(target=_read_worker, daemon=True, name="capture-read")
     _read_thread.start()
 
+    # The fail-closed mask needs the next detection before it can settle the
+    # frames in front of it, so it reads ahead of the processing loop and hands
+    # each frame over together with its finished mask.
+    fail_closed_mask = None
+    if fail_closed:
+        fail_closed_mask = FailClosedMask(yolo_seg.get_boxes_and_conf, _frame_q.get,
+                                          width, height, seg_skip_n)
+
     while cap.isOpened():
-        frame = _frame_q.get()
-        if frame is None:
-            break
+        if fail_closed_mask is not None:
+            _fc_item = fail_closed_mask.next()
+            if _fc_item is None:
+                break
+            frame, _fc_mask, _fc_boxes = _fc_item
+        else:
+            frame = _frame_q.get()
+            if frame is None:
+                break
 
         annotated     = frame.copy()
         curr_gray     = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -1412,7 +1447,12 @@ def process_video(
         is_seg_full_frame = (frame_idx % seg_skip_n == 0)
         yolo_boxes_full_space = None
         if yolo_seg is not None and blur_bodies:
-            if is_seg_full_frame or prev_gray is None:
+            if fail_closed_mask is not None:
+                # Already settled for this frame: nothing to detect or warp here.
+                # seg_mask_keypoints stays None so the skip-frame warp below is off.
+                last_seg_mask, yolo_boxes_full_space = _fc_mask, _fc_boxes
+                seg_mask_keypoints = None
+            elif is_seg_full_frame or prev_gray is None:
                 _t_yolo0 = time.time()
                 last_seg_mask, yolo_boxes_full_space = yolo_seg.get_mask_and_boxes(frame)
                 t_seg_total += time.time() - _t_yolo0
@@ -2169,6 +2209,9 @@ def process_video(
 
         frame_idx += 1
 
+    if fail_closed_mask is not None:
+        t_seg_total += fail_closed_mask.t_detect
+
     print(f"\n  Flushing {len(person_states)} remaining active stream(s)...")
     for idx, state in person_states.items():
         enc_t, emb_t, gender_label, gender_conf = state.flush_to_disk()
@@ -2319,6 +2362,8 @@ def process_video(
         # the is_full_frame block's duplicate-detection-avoidance comment) --
         # detection cost is entirely inside yolo_seg's own get_mask_and_boxes().
         print(f"Avg Detect+Mask/full: {t_seg_total      / n * 1000:.1f}ms  ({anonymizer}, includes detection -- person_detector not separately called)")
+        if fail_closed_mask is not None:
+            print(f"Avg EgoMotion/frame : {fail_closed_mask.t_ego / f * 1000:.1f}ms  (fail-closed mask, runs on every frame)")
     else:
         print(f"Avg Det/full frame  : {t_det_total      / n * 1000:.1f}ms  (person_detector, YOLO11n)")
         if selfie_seg is not None:
